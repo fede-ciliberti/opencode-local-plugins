@@ -12,7 +12,14 @@ import { Plugin } from "@opencode/plugin"
  *   - los niveles de esfuerzo, re-escritos para el paquete del provider local
  *     (`@opencode/ai/providers/openai-compatible` → `settings.reasoningEffort`),
  *   - `tools: true` cuando el modelo base lo soporta,
+ *   - las modalidades de entrada (`capabilities.input`: imagen, audio, video,
+ *     pdf) que el modelo base declara,
  *   - `limit.output` cuando el modelo base declara uno mayor.
+ *
+ * Sin las modalidades de entrada OpenCode asume texto solo y reemplaza cada
+ * adjunto por `ERROR: Cannot read "<file>" (this model does not support image
+ * input)`: el gateway puede publicar `vision: true` y aun así la imagen nunca
+ * sale del cliente.
  *
  * El contexto lo manda el gateway (`max_model_len`) y nunca se pisa. Así, dar de
  * alta un modelo virtual en el gateway alcanza: no hay que repetir su bloque
@@ -30,10 +37,31 @@ const SEPARATOR = /^[-_.:/]/
 type Reference = {
   readonly efforts: readonly string[]
   readonly tools: boolean
+  readonly input: readonly string[]
   readonly output?: number
 }
 
 const normalize = (id: string) => id.trim().toLowerCase()
+
+/** Modalidades de entrada declaradas por un modelo, sin duplicados ni vacíos. */
+function inputOf(model: { capabilities?: { input?: readonly string[] } }): string[] {
+  const values: string[] = []
+  for (const modality of model.capabilities?.input ?? []) {
+    if (typeof modality !== "string" || modality.length === 0) continue
+    if (!values.includes(modality)) values.push(modality)
+  }
+  return values
+}
+
+/** Une modalidades conservando el orden recibido y garantizando `text`. */
+function mergeInput(current: readonly string[] | undefined, extra: readonly string[]): string[] {
+  const values: string[] = ["text"]
+  for (const modality of [...(current ?? []), ...extra]) {
+    if (typeof modality !== "string" || modality.length === 0) continue
+    if (!values.includes(modality)) values.push(modality)
+  }
+  return values
+}
 
 /** Niveles de esfuerzo que declara un modelo de referencia, en orden de aparición. */
 function effortsOf(model: { variants?: readonly any[] }): string[] {
@@ -89,13 +117,25 @@ export default Plugin.define({
         if (LOCAL_PROVIDERS.includes(model.providerID)) continue
         const efforts = effortsOf(model)
         const tools = model.capabilities?.tools === true
+        const input = inputOf(model)
         const output = typeof model.limit?.output === "number" && model.limit.output > 0 ? model.limit.output : undefined
-        if (efforts.length === 0 && !tools) continue
-        const reference: Reference = { efforts, tools, output }
+        const richerInput = input.some((modality) => modality !== "text")
+        if (efforts.length === 0 && !tools && !richerInput) continue
+        const reference: Reference = { efforts, tools, input, output }
         const key = normalize(model.id)
         const current = references.get(key)
-        // Preferir la referencia que aporta más niveles de esfuerzo.
-        if (!current || current.efforts.length < efforts.length) references.set(key, reference)
+        if (!current) {
+          references.set(key, reference)
+          continue
+        }
+        // Preferir la referencia que aporta más niveles de esfuerzo, sin perder
+        // modalidades ni tools que sólo declare otra de las referencias.
+        references.set(key, {
+          efforts: current.efforts.length >= efforts.length ? current.efforts : efforts,
+          tools: current.tools || tools,
+          input: mergeInput(current.input, input),
+          output: current.output !== undefined && (output === undefined || current.output >= output) ? current.output : output,
+        })
       }
       if (references.size === 0) return
 
@@ -108,6 +148,8 @@ export default Plugin.define({
             target.variants = reference.efforts.map((id) => ({ id, settings: { reasoningEffort: id } }))
           }
           if (reference.tools) target.capabilities.tools = true
+          const input = mergeInput(target.capabilities.input, reference.input)
+          if (input.length > (target.capabilities.input?.length ?? 0)) target.capabilities.input = input
           if (reference.output && reference.output > (target.limit?.output ?? 0)) target.limit.output = reference.output
         })
       }

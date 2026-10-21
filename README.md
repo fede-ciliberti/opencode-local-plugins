@@ -7,7 +7,7 @@ there is nothing to publish and no entry in `plugins[]`.
 | Plugin | What it does |
 | --- | --- |
 | [`auto-approve.ts`](plugins/auto-approve.ts) | Turns every permission evaluation that would resolve to `ask` into `allow`, so background sessions do not hang waiting for a TUI that never has focus. An explicit `deny` never reaches the hook, so it stays as the kill switch. |
-| [`local-model-variants.ts`](plugins/local-model-variants.ts) | Completes models that arrive through local provider discovery (`vllm`, `ollama`): copies reasoning-effort variants, `tools` and a larger `limit.output` from the same base model published by any other provider in the registry. |
+| [`local-model-variants.ts`](plugins/local-model-variants.ts) | Completes models that arrive through local provider discovery (`vllm`, `ollama`): copies reasoning-effort variants, `tools`, input modalities and a larger `limit.output` from the same base model published by any other provider in the registry. |
 
 ## Install
 
@@ -42,7 +42,14 @@ configured providers) and copies:
 - reasoning efforts, re-spelled for the local provider package as `settings.reasoningEffort`
   (which reaches the wire as `reasoning_effort`),
 - `tools: true` when the base model supports tools,
+- the input modalities (`capabilities.input`: `image`, `audio`, `video`, `pdf`) the base
+  model declares,
 - `limit.output` when the base model declares a larger one.
+
+Input modalities are the difference between a working attachment and a silently dropped
+one: without `image` in `capabilities.input` OpenCode replaces every pasted image with
+`ERROR: Cannot read "<file>" (this model does not support image input)`, no matter what
+the gateway advertises about itself.
 
 The context limit is left alone: the gateway's `max_model_len` is authoritative. Name
 matching tries, in order: exact id, id with an operational suffix removed (`-pool`, `-alias`,
