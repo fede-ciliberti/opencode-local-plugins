@@ -7,7 +7,7 @@ there is nothing to publish and no entry in `plugins[]`.
 | Plugin | What it does |
 | --- | --- |
 | [`auto-approve.ts`](plugins/auto-approve.ts) | Turns every permission evaluation that would resolve to `ask` into `allow`, so background sessions do not hang waiting for a TUI that never has focus. An explicit `deny` never reaches the hook, so it stays as the kill switch. |
-| [`local-model-variants.ts`](plugins/local-model-variants.ts) | Completes models that arrive through local provider discovery (`vllm`, `ollama`): copies reasoning-effort variants, `tools`, input modalities and a larger `limit.output` from the same base model published by any other provider in the registry. |
+| [`local-model-variants.ts`](plugins/local-model-variants.ts) | Completes models that arrive through local provider discovery (`vllm`, `ollama`): copies reasoning-effort variants, `tools`, input modalities, temperature support, pricing and a larger `limit.output` from the same base model published by any other provider in the registry. |
 
 ## Install
 
@@ -40,10 +40,15 @@ looks the discovered id up in the rest of the registry (the models.dev catalog p
 configured providers) and copies:
 
 - reasoning efforts, re-spelled for the local provider package as `settings.reasoningEffort`
-  (which reaches the wire as `reasoning_effort`),
+  (which reaches the wire as `reasoning_effort`); a reference whose variants use another
+  package's knob (Google's `thinkingConfig`, for instance) contributes its standard level
+  ids (`low`, `medium`, `high`, ...) instead,
 - `tools: true` when the base model supports tools,
 - the input modalities (`capabilities.input`: `image`, `audio`, `video`, `pdf`) the base
   model declares,
+- `capabilities.temperature` when the base model accepts sampling controls,
+- `cost` (per-million pricing) from the first reference that publishes one, so session
+  spend is tracked for gateway models too,
 - `limit.output` when the base model declares a larger one.
 
 Input modalities are the difference between a working attachment and a silently dropped

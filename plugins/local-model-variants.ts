@@ -14,6 +14,8 @@ import { Plugin } from "@opencode/plugin"
  *   - `tools: true` cuando el modelo base lo soporta,
  *   - las modalidades de entrada (`capabilities.input`: imagen, audio, video,
  *     pdf) que el modelo base declara,
+ *   - `capabilities.temperature`, que habilita los controles de muestreo,
+ *   - el precio (`cost`), para que el gasto de la sesión se muestre y sume,
  *   - `limit.output` cuando el modelo base declara uno mayor.
  *
  * Sin las modalidades de entrada OpenCode asume texto solo y reemplaza cada
@@ -37,7 +39,9 @@ const SEPARATOR = /^[-_.:/]/
 type Reference = {
   readonly efforts: readonly string[]
   readonly tools: boolean
+  readonly temperature: boolean
   readonly input: readonly string[]
+  readonly cost?: readonly any[]
   readonly output?: number
 }
 
@@ -63,6 +67,14 @@ function mergeInput(current: readonly string[] | undefined, extra: readonly stri
   return values
 }
 
+/**
+ * Niveles de esfuerzo estándar. Se aceptan como fallback cuando la variante de
+ * referencia ajusta el razonamiento con un campo propio de otro paquete (por
+ * ejemplo `thinkingConfig` de Google): el id se re-usa como `reasoning_effort`,
+ * que es lo que entiende un provider OpenAI-compatible.
+ */
+const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+
 /** Niveles de esfuerzo que declara un modelo de referencia, en orden de aparición. */
 function effortsOf(model: { variants?: readonly any[] }): string[] {
   const values: string[] = []
@@ -72,7 +84,9 @@ function effortsOf(model: { variants?: readonly any[] }): string[] {
         ? variant.settings.reasoningEffort
         : typeof variant?.body?.reasoning_effort === "string"
           ? variant.body.reasoning_effort
-          : undefined
+          : typeof variant?.id === "string" && EFFORTS.has(variant.id.toLowerCase())
+            ? variant.id
+            : undefined
     if (effort && !values.includes(variant.id)) values.push(variant.id)
   }
   return values
@@ -117,11 +131,13 @@ export default Plugin.define({
         if (LOCAL_PROVIDERS.includes(model.providerID)) continue
         const efforts = effortsOf(model)
         const tools = model.capabilities?.tools === true
+        const temperature = model.capabilities?.temperature === true
         const input = inputOf(model)
+        const cost = Array.isArray(model.cost) && model.cost.length > 0 ? model.cost : undefined
         const output = typeof model.limit?.output === "number" && model.limit.output > 0 ? model.limit.output : undefined
         const richerInput = input.some((modality) => modality !== "text")
-        if (efforts.length === 0 && !tools && !richerInput) continue
-        const reference: Reference = { efforts, tools, input, output }
+        if (efforts.length === 0 && !tools && !richerInput && !cost) continue
+        const reference: Reference = { efforts, tools, temperature, input, cost, output }
         const key = normalize(model.id)
         const current = references.get(key)
         if (!current) {
@@ -129,11 +145,14 @@ export default Plugin.define({
           continue
         }
         // Preferir la referencia que aporta más niveles de esfuerzo, sin perder
-        // modalidades ni tools que sólo declare otra de las referencias.
+        // modalidades ni tools que sólo declare otra de las referencias. El
+        // precio lo aporta el primer provider que lo publique.
         references.set(key, {
           efforts: current.efforts.length >= efforts.length ? current.efforts : efforts,
           tools: current.tools || tools,
+          temperature: current.temperature || temperature,
           input: mergeInput(current.input, input),
+          cost: current.cost ?? cost,
           output: current.output !== undefined && (output === undefined || current.output >= output) ? current.output : output,
         })
       }
@@ -148,8 +167,10 @@ export default Plugin.define({
             target.variants = reference.efforts.map((id) => ({ id, settings: { reasoningEffort: id } }))
           }
           if (reference.tools) target.capabilities.tools = true
+          if (reference.temperature) target.capabilities.temperature = true
           const input = mergeInput(target.capabilities.input, reference.input)
           if (input.length > (target.capabilities.input?.length ?? 0)) target.capabilities.input = input
+          if ((target.cost?.length ?? 0) === 0 && reference.cost?.length) target.cost = [...reference.cost]
           if (reference.output && reference.output > (target.limit?.output ?? 0)) target.limit.output = reference.output
         })
       }
