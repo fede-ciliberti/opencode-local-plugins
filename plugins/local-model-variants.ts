@@ -100,26 +100,69 @@ function stripSuffixes(id: string): string {
   return current
 }
 
+/** Id sin el namespace del provider (`google/diffusiongemma-26b-a4b-it` → `diffusiongemma-26b-a4b-it`). */
+function basename(id: string): string {
+  const slash = id.lastIndexOf("/")
+  return slash >= 0 ? id.slice(slash + 1) : id
+}
+
 /**
  * Busca el modelo de referencia para un id descubierto, en orden:
- * exacto → sin sufijo operativo → prefijo más largo cerrado por separador.
+ * exacto → sin sufijo operativo → prefijo más largo cerrado por separador
+ * (sobre los ids completos) → exacto o sin sufijo sobre los alias, y por
+ * último el nombre pelado como prefijo del alias.
+ *
+ * Los alias son los ids de referencia sin namespace de provider; cubren las
+ * virtual models bautizadas con el nombre pelado del modelo
+ * (`diffusiongemma-pool`) cuando la referencia vive con namespace
+ * (`google/diffusiongemma-26b-a4b-it`). Sin ellos la resolución falla en
+ * silencio, el modelo queda texto-only y OpenCode reemplaza cada adjunto por
+ * `ERROR: Cannot read "…" (this model does not support image input)`.
  */
-function resolve(references: Map<string, Reference>, modelID: string): Reference | undefined {
+function resolve(
+  references: Map<string, Reference>,
+  aliases: Map<string, Reference>,
+  modelID: string,
+): Reference | undefined {
   const id = normalize(modelID)
   const exact = references.get(id)
   if (exact) return exact
 
-  const bySuffix = references.get(stripSuffixes(id))
+  const base = stripSuffixes(id)
+  const bySuffix = references.get(base)
   if (bySuffix) return bySuffix
 
-  let best: { key: string; reference: Reference } | undefined
+  let longest: { key: string; reference: Reference } | undefined
   for (const [key, reference] of references) {
     if (key.length < 8 || !id.startsWith(key)) continue
     const rest = id.slice(key.length)
     if (rest.length > 0 && !SEPARATOR.test(rest)) continue
-    if (!best || key.length > best.key.length) best = { key, reference }
+    if (!longest || key.length > longest.key.length) longest = { key, reference }
   }
-  return best?.reference
+  if (longest) return longest.reference
+
+  const alias = aliases.get(id) ?? aliases.get(base)
+  if (alias) return alias
+
+  // El nombre pelado del modelo descubierto es prefijo del alias, no al revés.
+  // Gana la extensión más corta (la referencia más específica); un empate se
+  // descarta porque elegir cualquiera de las dos contaminaría el modelo con
+  // capacidades ajenas.
+  if (base.length < 8) return undefined
+  let shortest: { reference: Reference; rest: number } | undefined
+  let ambiguous = false
+  for (const [key, reference] of aliases) {
+    if (!key.startsWith(base)) continue
+    const rest = key.slice(base.length)
+    if (rest.length === 0 || !SEPARATOR.test(rest)) continue
+    if (!shortest || rest.length < shortest.rest) {
+      shortest = { reference, rest: rest.length }
+      ambiguous = false
+    } else if (rest.length === shortest.rest) {
+      ambiguous = true
+    }
+  }
+  return ambiguous ? undefined : shortest?.reference
 }
 
 export default Plugin.define({
@@ -127,6 +170,28 @@ export default Plugin.define({
   setup: async (ctx) => {
     await ctx.model.transform((editor) => {
       const references = new Map<string, Reference>()
+      const aliases = new Map<string, Reference>()
+      const remember = (map: Map<string, Reference>, key: string, reference: Reference) => {
+        const current = map.get(key)
+        if (!current) {
+          map.set(key, reference)
+          return
+        }
+        // Preferir la referencia que aporta más niveles de esfuerzo, sin perder
+        // modalidades ni tools que sólo declare otra de las referencias. El
+        // precio lo aporta el primer provider que lo publique.
+        map.set(key, {
+          efforts: current.efforts.length >= reference.efforts.length ? current.efforts : reference.efforts,
+          tools: current.tools || reference.tools,
+          temperature: current.temperature || reference.temperature,
+          input: mergeInput(current.input, reference.input),
+          cost: current.cost ?? reference.cost,
+          output:
+            current.output !== undefined && (reference.output === undefined || current.output >= reference.output)
+              ? current.output
+              : reference.output,
+        })
+      }
       for (const model of editor.list()) {
         if (LOCAL_PROVIDERS.includes(model.providerID)) continue
         const efforts = effortsOf(model)
@@ -138,29 +203,18 @@ export default Plugin.define({
         const richerInput = input.some((modality) => modality !== "text")
         if (efforts.length === 0 && !tools && !richerInput && !cost) continue
         const reference: Reference = { efforts, tools, temperature, input, cost, output }
-        const key = normalize(model.id)
-        const current = references.get(key)
-        if (!current) {
-          references.set(key, reference)
-          continue
-        }
-        // Preferir la referencia que aporta más niveles de esfuerzo, sin perder
-        // modalidades ni tools que sólo declare otra de las referencias. El
-        // precio lo aporta el primer provider que lo publique.
-        references.set(key, {
-          efforts: current.efforts.length >= efforts.length ? current.efforts : efforts,
-          tools: current.tools || tools,
-          temperature: current.temperature || temperature,
-          input: mergeInput(current.input, input),
-          cost: current.cost ?? cost,
-          output: current.output !== undefined && (output === undefined || current.output >= output) ? current.output : output,
-        })
+        remember(references, normalize(model.id), reference)
+        // Alias aparte: si el nombre pelado se mezclara en el mapa principal,
+        // dos providers con el mismo modelo bajo otro namespace cambiarían los
+        // límites y variantes de una referencia que ya resolvía por id exacto.
+        const base = normalize(basename(model.id))
+        if (base !== normalize(model.id)) remember(aliases, base, reference)
       }
       if (references.size === 0) return
 
       for (const model of editor.list()) {
         if (!LOCAL_PROVIDERS.includes(model.providerID)) continue
-        const reference = resolve(references, model.id)
+        const reference = resolve(references, aliases, model.id)
         if (!reference) continue
         editor.update(model.providerID, model.id, (target) => {
           if ((target.variants?.length ?? 0) === 0 && reference.efforts.length > 0) {

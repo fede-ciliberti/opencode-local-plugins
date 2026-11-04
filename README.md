@@ -59,8 +59,12 @@ the gateway advertises about itself.
 The context limit is left alone: the gateway's `max_model_len` is authoritative. Name
 matching tries, in order: exact id, id with an operational suffix removed (`-pool`, `-alias`,
 `-vm`, `-lb`, `-group`, `-balance`, `-router`), then the longest prefix closed by a
-separator. Declaring a new virtual model on the gateway is therefore enough: no per-model
-block in `opencode.json`.
+separator. When the base model is published under a provider namespace
+(`google/diffusiongemma-26b-a4b-it`) and the virtual model is named with the bare model name
+(`diffusiongemma-pool`), the same lookup runs again over the namespace-stripped ids, and the
+bare name may also be a prefix of the alias (`diffusiongemma` → `diffusiongemma-26b-a4b-it`,
+shortest extension wins, ties are dropped). Declaring a new virtual model on the gateway is
+therefore enough: no per-model block in `opencode.json`.
 
 ## Requirements
 
